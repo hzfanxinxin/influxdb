@@ -1087,11 +1087,7 @@ func cloneSource(s Source) Source {
 
 	switch s := s.(type) {
 	case *Measurement:
-		m := &Measurement{Database: s.Database, RetentionPolicy: s.RetentionPolicy, Name: s.Name}
-		if s.Regex != nil {
-			m.Regex = &RegexLiteral{Val: regexp.MustCompile(s.Regex.Val.String())}
-		}
-		return m
+		return s.Clone()
 	case *SubQuery:
 		return &SubQuery{Statement: s.Statement.Clone()}
 	default:
@@ -3194,6 +3190,26 @@ type Measurement struct {
 	Name            string
 	Regex           *RegexLiteral
 	IsTarget        bool
+
+	// This field indicates that the measurement should read be read from the
+	// specified system iterator.
+	SystemIterator string
+}
+
+// Clone returns a deep clone of the Measurement.
+func (m *Measurement) Clone() *Measurement {
+	var regexp *RegexLiteral
+	if m.Regex != nil && m.Regex.Val != nil {
+		regexp = &RegexLiteral{Val: m.Regex.Val.Copy()}
+	}
+	return &Measurement{
+		Database:        m.Database,
+		RetentionPolicy: m.RetentionPolicy,
+		Name:            m.Name,
+		Regex:           regexp,
+		IsTarget:        m.IsTarget,
+		SystemIterator:  m.SystemIterator,
+	}
 }
 
 // String returns a string representation of the measurement.
@@ -3212,8 +3228,10 @@ func (m *Measurement) String() string {
 		_, _ = buf.WriteString(`.`)
 	}
 
-	if m.Name != "" {
+	if m.Name != "" && m.SystemIterator == "" {
 		_, _ = buf.WriteString(QuoteIdent(m.Name))
+	} else if m.SystemIterator != "" {
+		_, _ = buf.WriteString(QuoteIdent(m.SystemIterator))
 	} else if m.Regex != nil {
 		_, _ = buf.WriteString(m.Regex.String())
 	}
@@ -3490,7 +3508,9 @@ type ParenExpr struct {
 }
 
 // String returns a string representation of the parenthesized expression.
-func (e *ParenExpr) String() string { return fmt.Sprintf("(%s)", e.Expr.String()) }
+func (e *ParenExpr) String() string {
+	return fmt.Sprintf("(%s)", e.Expr.String())
+}
 
 // RegexLiteral represents a regular expression.
 type RegexLiteral struct {

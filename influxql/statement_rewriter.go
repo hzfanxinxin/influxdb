@@ -93,6 +93,14 @@ func rewriteShowMeasurementsStatement(stmt *ShowMeasurementsStatement) (Statemen
 		sources = Sources{stmt.Source}
 	}
 
+	// Check if we can exclusively use the index via the ShowMeasurementsStatement.
+	if !HasTimeExpr(stmt.Condition) {
+		stmt.Condition = rewriteSourcesCondition(sources, stmt.Condition)
+		return stmt, nil
+	}
+
+	// The query is bounded by time then it will have to query TSM data rather
+	// than utilising the index via system iterators.
 	return &SelectStatement{
 		Fields: []*Field{
 			{Expr: &VarRef{Val: "_name"}, Alias: "name"},
@@ -156,11 +164,7 @@ func rewriteShowMeasurementCardinalityStatement(stmt *ShowMeasurementCardinality
 }
 
 func rewriteShowSeriesStatement(stmt *ShowSeriesStatement) (Statement, error) {
-	return &SelectStatement{
-		Fields: []*Field{
-			{Expr: &VarRef{Val: "_seriesKey"}, Alias: "key"},
-		},
-		Sources:    rewriteSources2(stmt.Sources, stmt.Database),
+	s := &SelectStatement{
 		Condition:  stmt.Condition,
 		Offset:     stmt.Offset,
 		Limit:      stmt.Limit,
@@ -169,7 +173,22 @@ func rewriteShowSeriesStatement(stmt *ShowSeriesStatement) (Statement, error) {
 		StripName:  true,
 		Dedupe:     true,
 		IsRawQuery: true,
-	}, nil
+	}
+	// Check if we can exclusively use the index.
+	if !HasTimeExpr(stmt.Condition) {
+		s.Fields = []*Field{{Expr: &VarRef{Val: "key"}}}
+		s.Sources = rewriteSources(stmt.Sources, "_series", stmt.Database)
+		s.Condition = rewriteSourcesCondition(s.Sources, s.Condition)
+		return s, nil
+	}
+
+	// The query is bounded by time then it will have to query TSM data rather
+	// than utilising the index via system iterators.
+	s.Fields = []*Field{
+		{Expr: &VarRef{Val: "_seriesKey"}, Alias: "key"},
+	}
+	s.Sources = rewriteSources2(stmt.Sources, stmt.Database)
+	return s, nil
 }
 
 func rewriteShowSeriesCardinalityStatement(stmt *ShowSeriesCardinalityStatement) (Statement, error) {
@@ -334,17 +353,7 @@ func rewriteShowTagValuesCardinalityStatement(stmt *ShowTagValuesCardinalityStat
 }
 
 func rewriteShowTagKeysStatement(stmt *ShowTagKeysStatement) (Statement, error) {
-	return &SelectStatement{
-		Fields: []*Field{
-			{
-				Expr: &Call{
-					Name: "distinct",
-					Args: []Expr{&VarRef{Val: "_tagKey"}},
-				},
-				Alias: "tagKey",
-			},
-		},
-		Sources:    rewriteSources2(stmt.Sources, stmt.Database),
+	s := &SelectStatement{
 		Condition:  stmt.Condition,
 		Offset:     stmt.Offset,
 		Limit:      stmt.Limit,
@@ -352,7 +361,29 @@ func rewriteShowTagKeysStatement(stmt *ShowTagKeysStatement) (Statement, error) 
 		OmitTime:   true,
 		Dedupe:     true,
 		IsRawQuery: true,
-	}, nil
+	}
+
+	// Check if we can exclusively use the index.
+	if !HasTimeExpr(stmt.Condition) {
+		s.Fields = []*Field{{Expr: &VarRef{Val: "tagKey"}}}
+		s.Sources = rewriteSources(stmt.Sources, "_tagKeys", stmt.Database)
+		s.Condition = rewriteSourcesCondition(s.Sources, stmt.Condition)
+		return s, nil
+	}
+
+	// The query is bounded by time then it will have to query TSM data rather
+	// than utilising the index via system iterators.
+	s.Fields = []*Field{
+		{
+			Expr: &Call{
+				Name: "distinct",
+				Args: []Expr{&VarRef{Val: "_tagKey"}},
+			},
+			Alias: "tagKey",
+		},
+	}
+	s.Sources = rewriteSources2(stmt.Sources, stmt.Database)
+	return s, nil
 }
 
 func rewriteShowTagKeyCardinalityStatement(stmt *ShowTagKeyCardinalityStatement) (Statement, error) {
@@ -392,8 +423,10 @@ func rewriteShowTagKeyCardinalityStatement(stmt *ShowTagKeyCardinalityStatement)
 	}, nil
 }
 
-// rewriteSources rewrites sources with previous database and retention policy
-func rewriteSources(sources Sources, measurementName, defaultDatabase string) Sources {
+// rewriteSources rewrites sources to include the provided system iterator.
+//
+// rewriteSources also sets the default database where necessary.
+func rewriteSources(sources Sources, systemIterator, defaultDatabase string) Sources {
 	newSources := Sources{}
 	for _, src := range sources {
 		if src == nil {
@@ -404,17 +437,16 @@ func rewriteSources(sources Sources, measurementName, defaultDatabase string) So
 		if database == "" {
 			database = defaultDatabase
 		}
-		newSources = append(newSources,
-			&Measurement{
-				Database:        database,
-				RetentionPolicy: mm.RetentionPolicy,
-				Name:            measurementName,
-			})
+
+		newM := mm.Clone()
+		newM.SystemIterator, newM.Database = systemIterator, database
+		newSources = append(newSources, newM)
 	}
+
 	if len(newSources) <= 0 {
 		return append(newSources, &Measurement{
-			Database: defaultDatabase,
-			Name:     measurementName,
+			Database:       defaultDatabase,
+			SystemIterator: systemIterator,
 		})
 	}
 	return newSources
@@ -459,12 +491,18 @@ func rewriteSourcesCondition(sources Sources, cond Expr) Expr {
 		}
 	}
 
-	if cond != nil {
+	// This is the case where the original query has a WHERE on a tag, and also
+	// is requesting from a specific source.
+	if cond != nil && scond != nil {
 		return &BinaryExpr{
 			Op:  AND,
 			LHS: &ParenExpr{Expr: scond},
 			RHS: &ParenExpr{Expr: cond},
 		}
+	} else if cond != nil {
+		// This is the case where the original query has a WHERE on a tag but
+		// is not requesting from a specific source.
+		return cond
 	}
 	return scond
 }
