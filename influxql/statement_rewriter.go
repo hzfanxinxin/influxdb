@@ -93,29 +93,16 @@ func rewriteShowMeasurementsStatement(stmt *ShowMeasurementsStatement) (Statemen
 		sources = Sources{stmt.Source}
 	}
 
-	// Check if we can exclusively use the index via the ShowMeasurementsStatement.
-	if !HasTimeExpr(stmt.Condition) {
-		stmt.Condition = rewriteSourcesCondition(sources, stmt.Condition)
-		return stmt, nil
+	// Currently time based SHOW MEASUREMENT queries can't be supported because
+	// it's not possible to appropriate set operations such as a negated regex
+	// using the query engine.
+	if HasTimeExpr(stmt.Condition) {
+		return nil, errors.New("SHOW MEASUREMENTS doesn't support time in WHERE clause")
 	}
 
-	// The query is bounded by time then it will have to query TSM data rather
-	// than utilising the index via system iterators.
-	return &SelectStatement{
-		Fields: []*Field{
-			{Expr: &VarRef{Val: "_name"}, Alias: "name"},
-		},
-		Sources:    rewriteSources2(sources, stmt.Database),
-		Condition:  stmt.Condition,
-		Offset:     stmt.Offset,
-		Limit:      stmt.Limit,
-		SortFields: stmt.SortFields,
-		OmitTime:   true,
-		StripName:  true,
-		EmitName:   "measurements",
-		Dedupe:     true,
-		IsRawQuery: true,
-	}, nil
+	// rewrite condition to push a source measurement into a "_name" tag.
+	stmt.Condition = rewriteSourcesCondition(sources, stmt.Condition)
+	return stmt, nil
 }
 
 func rewriteShowMeasurementCardinalityStatement(stmt *ShowMeasurementCardinalityStatement) (Statement, error) {
@@ -382,6 +369,7 @@ func rewriteShowTagKeysStatement(stmt *ShowTagKeysStatement) (Statement, error) 
 			Alias: "tagKey",
 		},
 	}
+
 	s.Sources = rewriteSources2(stmt.Sources, stmt.Database)
 	return s, nil
 }
